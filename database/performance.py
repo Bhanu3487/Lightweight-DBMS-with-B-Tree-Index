@@ -1,188 +1,193 @@
-#db_management_system/database/performance.py
-import sys
+# File: db_management_system/database/performance.py
+
 import time
-import math
 import random
-import tracemalloc 
+import sys
+import math
+import tracemalloc
+from copy import deepcopy
+
 from .bplustree import BPlusTree
 from .bruteforce import BruteForceDB
 
-# --- tracemalloc needs careful start/stop ---
+try:
+    from pympler import asizeof
+    use_pympler = True
+except ImportError:
+    use_pympler = False
+    def asizeof(obj): return sys.getsizeof(obj) # Basic fallback
 
 class PerformanceAnalyzer:
     """
-    Analyzes BPlusTree vs BruteForceDB using separate test methods per operation.
-    Uses tracemalloc for peak insertion memory comparison.
-    Includes random mix test.
+    Analyzes BPlusTree vs BruteForceDB. INDEPENDENT TESTS per operation.
+    Compares B+ Tree (Unsorted Build) vs B+ Tree (Sorted Build) vs Brute Force.
+    Focuses on Peak Insert Memory (tracemalloc) across orders.
+    Times all core operations (Insert, Search, Range, Delete, Update, Mix) across orders.
     """
-
     def __init__(self):
-        # Order is now passed to relevant methods, not stored instance-wide
-        pass
+        pass # Config passed to methods
 
     def _generate_random_data(self, size, max_key_value=None, sort_keys=False):
-        """Generates key-value pairs, optionally sorted."""
         if max_key_value is None: max_key_value = size * 3
         effective_size = min(size, max_key_value)
-        if effective_size < size: print(f"Warning: Size {size} > range {max_key_value}. Generating {effective_size} items.")
+        if effective_size < size: print(f"Warn: Size {size}>Rng {max_key_value}. Gen {effective_size}.")
         keys = random.sample(range(1, max_key_value + 1), effective_size)
         if sort_keys: keys.sort()
-        data = [(key, f"value_{key}") for key in keys]
-        if not sort_keys: random.shuffle(data)
-        return data, keys
+        data_pairs = [(key, f"value_{key*2}") for key in keys] # Make values slightly different
+        if not sort_keys: random.shuffle(data_pairs)
+        return data_pairs, keys
 
     def _trace_and_time_insertion(self, db_class, order, data_pairs):
-        """Helper to insert data while tracing memory and timing."""
-        # Create instance inside trace block if possible? No, class needed.
-        if db_class == BPlusTree:
-            instance = db_class(order=order)
-        else: # BruteForceDB
-            instance = db_class()
-
-        tracemalloc.start()
-        t_start = time.perf_counter()
-        tracemalloc.reset_peak()
-
-        for key, value in data_pairs:
-            instance.insert(key, value)
-
-        t_end = time.perf_counter()
-        current, peak = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
-
+        """Inserts data, returns (insert_time, peak_memory_bytes)."""
+        if db_class == BPlusTree: instance = db_class(order=order)
+        else: instance = db_class()
+        tracemalloc.start(); t_start = time.perf_counter(); tracemalloc.reset_peak()
+        for key, value in data_pairs: instance.insert(key, value)
+        t_end = time.perf_counter(); _, peak = tracemalloc.get_traced_memory(); tracemalloc.stop()
         insert_time = t_end - t_start
-        # Make sure instance is cleaned up if not needed outside
         del instance
         return insert_time, peak
 
     def run_insertion_memory_time_test(self, data_size, btree_order):
-        """
-        Tests peak memory (tracemalloc) and time for insertion strategies.
-
-        Returns: dict with keys like 'bf_insert_time', 'bf_peak_mem',
-                 'bplus_insert_time_unsorted', 'bplus_peak_mem_unsorted', etc.
-        """
+        """Tests ONLY peak memory and time for INSERTS."""
         results = {}
-        print(f"    Running Insert/Memory Test (Size: {data_size}, Order: {btree_order})...")
-
-        # 1. Brute Force
+        print(f"    Ins/Mem Test (Size:{data_size}, Order:{btree_order})...")
         bf_data, _ = self._generate_random_data(data_size)
         bf_time, bf_peak = self._trace_and_time_insertion(BruteForceDB, None, bf_data)
-        results['bf_insert_time'] = bf_time
-        results['bf_peak_mem'] = bf_peak
-        del bf_data
-
-        # 2. B+ Tree Unsorted
-        unsorted_data, _ = self._generate_random_data(data_size, sort_keys=False)
-        unsorted_time, unsorted_peak = self._trace_and_time_insertion(BPlusTree, btree_order, unsorted_data)
-        results['bplus_insert_time_unsorted'] = unsorted_time
-        results['bplus_peak_mem_unsorted'] = unsorted_peak
-        del unsorted_data
-
-        # 3. B+ Tree Sorted
-        sorted_data, _ = self._generate_random_data(data_size, sort_keys=True)
-        sorted_time, sorted_peak = self._trace_and_time_insertion(BPlusTree, btree_order, sorted_data)
-        results['bplus_insert_time_sorted'] = sorted_time
-        results['bplus_peak_mem_sorted'] = sorted_peak
-        del sorted_data
-
-        print(f"      Peaks (BF/B+U/B+S): {bf_peak}/{unsorted_peak}/{sorted_peak} bytes")
+        results['bf_insert_time'] = bf_time; results['bf_peak_mem'] = bf_peak; del bf_data
+        uns_data, _ = self._generate_random_data(data_size, sort_keys=False)
+        uns_time, uns_peak = self._trace_and_time_insertion(BPlusTree, btree_order, uns_data)
+        results['bplus_insert_time_unsorted'] = uns_time; results['bplus_peak_mem_unsorted'] = uns_peak; del uns_data
+        sor_data, _ = self._generate_random_data(data_size, sort_keys=True)
+        sor_time, sor_peak = self._trace_and_time_insertion(BPlusTree, btree_order, sor_data)
+        results['bplus_insert_time_sorted'] = sor_time; results['bplus_peak_mem_sorted'] = sor_peak; del sor_data
         return results
 
-    # --- Op Timing Tests (Require separate setup now) ---
+    def _setup_all_for_timing(self, data_size, btree_order):
+         """ Helper to create all 3 populated instances needed for one timing test run """
+         # Generate base keys
+         base_data, base_keys = self._generate_random_data(data_size, sort_keys=False)
 
-    def _setup_test_instances(self, data_size, btree_order):
-        """Helper to create populated instances for timing tests."""
-        data_pairs, keys = self._generate_random_data(data_size, sort_keys=False) # Use unsorted setup
-        btree = BPlusTree(order=btree_order)
-        bf_db = BruteForceDB()
-        for k, v in data_pairs:
-            btree.insert(k, v)
-            bf_db.insert(k, v)
-        return btree, bf_db, keys
+         # BF uses unsorted data
+         bf_db = BruteForceDB()
+         for k, v in base_data: bf_db.insert(k, v)
+
+         # B+ Unsorted uses unsorted data
+         btree_unsorted = BPlusTree(order=btree_order) # <<< Variable defined here
+         for k, v in base_data: btree_unsorted.insert(k, v)
+
+         # B+ Sorted uses sorted data (built from same keys)
+         sorted_data = sorted(base_data, key=lambda item: item[0]) # Sort pairs by key
+         btree_sorted = BPlusTree(order=btree_order) # <<< Variable defined here
+         for k, v in sorted_data: btree_sorted.insert(k, v)
+
+         return btree_unsorted, btree_sorted, bf_db, base_keys # CORRECT - Return defined variables
+
+    # --- Timing Tests for Other Operations ---
 
     def run_search_test(self, data_size, btree_order):
         """Tests search time."""
-        print(f"    Running Search Test (Size: {data_size}, Order: {btree_order})...")
-        btree, bf_db, keys_present = self._setup_test_instances(data_size, btree_order)
-        if not keys_present: return {'bplus_search_time': 0, 'bf_search_time': 0}
+        print(f"    Search Test (Size:{data_size}, Order:{btree_order})...")
+        bplus_uns, bplus_sort, bf_db, keys_present = self._setup_all_for_timing(data_size, btree_order)
+        if not keys_present: return {'bplus_search_time_unsorted': 0, 'bplus_search_time_sorted': 0, 'bf_search_time': 0}
         results = {}
-        search_sample_size = min(len(keys_present), max(1000, len(keys_present)//5))
-        keys_to_search = random.sample(keys_present, k=search_sample_size)
-        t_start = time.perf_counter(); [btree.search(k) for k in keys_to_search]; results['bplus_search_time'] = time.perf_counter() - t_start
+        sample_size = min(len(keys_present), max(500, len(keys_present)//10)) # Smaller sample
+        keys_to_search = random.sample(keys_present, k=sample_size)
+        t_start = time.perf_counter(); [bplus_uns.search(k) for k in keys_to_search]; results['bplus_search_time_unsorted'] = time.perf_counter() - t_start
+        t_start = time.perf_counter(); [bplus_sort.search(k) for k in keys_to_search]; results['bplus_search_time_sorted'] = time.perf_counter() - t_start
         t_start = time.perf_counter(); [bf_db.search(k) for k in keys_to_search]; results['bf_search_time'] = time.perf_counter() - t_start
-        results['num_searches'] = search_sample_size
-        print(f"      Search (B+/BF): {results['bplus_search_time']:.4f}s / {results['bf_search_time']:.4f}s")
-        return results
+        results['num_searches'] = sample_size
+        del bplus_uns, bplus_sort, bf_db; return results
 
-    def run_range_query_test(self, data_size, btree_order, num_queries=100):
+    def run_range_query_test(self, data_size, btree_order, num_queries=50): # Fewer queries
         """Tests range query time."""
-        print(f"    Running Range Test (Size: {data_size}, Order: {btree_order})...")
-        btree, bf_db, keys_present = self._setup_test_instances(data_size, btree_order)
-        if not keys_present or len(keys_present) < 2: return {'bplus_range_time': 0, 'bf_range_time': 0}
-        results = {}
-        min_k, max_k = min(keys_present), max(keys_present); span = max_k - min_k
-        if span <= 0: return {'bplus_range_time': 0, 'bf_range_time': 0}
+        print(f"    Range Test (Size:{data_size}, Order:{btree_order})...")
+        bplus_uns, bplus_sort, bf_db, keys_present = self._setup_all_for_timing(data_size, btree_order)
+        if not keys_present or len(keys_present) < 2: return {'bplus_range_time_unsorted': 0, 'bplus_range_time_sorted': 0, 'bf_range_time': 0}
+        results = {}; min_k, max_k = min(keys_present), max(keys_present); span = max_k - min_k
+        if span <= 0: return {'bplus_range_time_unsorted': 0, 'bplus_range_time_sorted': 0, 'bf_range_time': 0}
         queries = []
         for _ in range(num_queries):
              r_size = random.randint(1, max(2, span // 20)); s_k = random.randint(min_k, max(min_k, max_k - r_size)); e_k = s_k + r_size; queries.append((s_k, e_k))
-        t_start = time.perf_counter(); [btree.range_query(s, e) for s,e in queries]; results['bplus_range_time'] = time.perf_counter() - t_start
+        t_start = time.perf_counter(); [bplus_uns.range_query(s, e) for s,e in queries]; results['bplus_range_time_unsorted'] = time.perf_counter() - t_start
+        t_start = time.perf_counter(); [bplus_sort.range_query(s, e) for s,e in queries]; results['bplus_range_time_sorted'] = time.perf_counter() - t_start
         t_start = time.perf_counter(); [bf_db.range_query(s, e) for s,e in queries]; results['bf_range_time'] = time.perf_counter() - t_start
-        print(f"      Range (B+/BF): {results['bplus_range_time']:.4f}s / {results['bf_range_time']:.4f}s")
-        return results
+        del bplus_uns, bplus_sort, bf_db; return results
 
-    def run_delete_test(self, data_size, btree_order, delete_percentage=30):
+    def run_delete_test(self, data_size, btree_order, delete_percentage=20): # Lower %
         """Tests deletion time."""
-        print(f"    Running Delete Test (Size: {data_size}, Order: {btree_order})...")
-        btree, bf_db, keys_present = self._setup_test_instances(data_size, btree_order)
-        if not keys_present: return {'bplus_delete_time': 0, 'bf_delete_time': 0}
+        print(f"    Delete Test (Size:{data_size}, Order:{btree_order})...")
+        bplus_uns, bplus_sort, bf_db, keys_present = self._setup_all_for_timing(data_size, btree_order)
+        if not keys_present: return {'bplus_delete_time_unsorted': 0, 'bplus_delete_time_sorted': 0, 'bf_delete_time': 0}
         results = {}
         num_to_delete = int(len(keys_present) * (delete_percentage / 100.0))
         keys_to_delete = random.sample(keys_present, k=min(num_to_delete, len(keys_present)))
-        keys_b = list(keys_to_delete); random.shuffle(keys_b)
-        keys_f = list(keys_to_delete); random.shuffle(keys_f)
-        t_start = time.perf_counter(); [btree.delete(k) for k in keys_b]; results['bplus_delete_time'] = time.perf_counter() - t_start
+        keys_b_uns = list(keys_to_delete); keys_b_sort = list(keys_to_delete); keys_f = list(keys_to_delete)
+        random.shuffle(keys_b_uns); random.shuffle(keys_b_sort); random.shuffle(keys_f)
+        t_start = time.perf_counter(); [bplus_uns.delete(k) for k in keys_b_uns]; results['bplus_delete_time_unsorted'] = time.perf_counter() - t_start
+        t_start = time.perf_counter(); [bplus_sort.delete(k) for k in keys_b_sort]; results['bplus_delete_time_sorted'] = time.perf_counter() - t_start
         t_start = time.perf_counter(); [bf_db.delete(k) for k in keys_f]; results['bf_delete_time'] = time.perf_counter() - t_start
-        print(f"      Delete (B+/BF): {results['bplus_delete_time']:.4f}s / {results['bf_delete_time']:.4f}s")
-        return results
+        del bplus_uns, bplus_sort, bf_db; return results
 
-    def run_random_mix_test(self, data_size, btree_order, num_operations_factor=0.5):
+    def run_update_test(self, data_size, btree_order):
+        """Tests update time."""
+        print(f"    Update Test (Size:{data_size}, Order:{btree_order})...")
+        bplus_uns, bplus_sort, bf_db, keys_present = self._setup_all_for_timing(data_size, btree_order)
+        if not keys_present: return {'bplus_update_time_unsorted': 0, 'bplus_update_time_sorted': 0, 'bf_update_time': 0}
+        results = {}
+        sample_size = min(len(keys_present), max(500, len(keys_present)//10)) # Smaller sample
+        keys_to_update = random.sample(keys_present, k=sample_size)
+        new_vals = [f"upd_{k}" for k in keys_to_update] # Consistent new values
+        t_start = time.perf_counter(); [bplus_uns.update(k, v) for k, v in zip(keys_to_update, new_vals)]; results['bplus_update_time_unsorted'] = time.perf_counter() - t_start
+        t_start = time.perf_counter(); [bplus_sort.update(k, v) for k, v in zip(keys_to_update, new_vals)]; results['bplus_update_time_sorted'] = time.perf_counter() - t_start
+        t_start = time.perf_counter(); [bf_db.update(k, v) for k, v in zip(keys_to_update, new_vals)]; results['bf_update_time'] = time.perf_counter() - t_start
+        del bplus_uns, bplus_sort, bf_db; return results
+
+    def run_random_mix_test(self, data_size, btree_order, num_operations_factor=0.3): # Lower factor
         """Tests time for a random mix of operations."""
-        print(f"    Running Mix Test (Size: {data_size}, Order: {btree_order})...")
-        btree, bf_db, keys_initial = self._setup_test_instances(data_size, btree_order) # Setup fresh
+        print(f"    Mix Test (Size:{data_size}, Order:{btree_order})...")
+        bplus_uns, bplus_sort, bf_db, keys_initial = self._setup_all_for_timing(data_size, btree_order)
+        if not keys_initial: return {'bplus_mix_time_unsorted': 0, 'bplus_mix_time_sorted': 0, 'bf_mix_time': 0}
         results = {}
         num_operations = int(data_size * num_operations_factor)
-        current_keys_b = set(keys_initial) # Start with known keys
-        max_key_val = data_size * 3
-        ops = []
+        ops = []; op_keys_basis = set(keys_initial); max_key_val = data_size * 3
         for _ in range(num_operations): # Generate ops
-             op_type = random.choice(['insert', 'search', 'delete'])
+             op_type = random.choice(['insert', 'search', 'delete', 'update'])
              key = None
-             if op_type == 'insert': key = random.randint(1, max_key_val); ops.append(('insert', key, f"value_{key}"))
-             elif op_type == 'search': key = random.randint(1, max_key_val) if random.random() < 0.3 or not current_keys_b else random.choice(list(current_keys_b)); ops.append(('search', key))
+             if op_type == 'insert': key = random.randint(1, max_key_val); ops.append(('insert', key, f"v_{key}"))
+             elif op_type == 'search': key = random.randint(1, max_key_val) if random.random() < 0.3 or not op_keys_basis else random.choice(list(op_keys_basis)); ops.append(('search', key))
+             elif op_type == 'update':
+                  if op_keys_basis: key = random.choice(list(op_keys_basis)); ops.append(('update', key, f"upd_{key}"))
+                  else: key = random.randint(1, max_key_val); ops.append(('insert', key, f"v_{key}"))
              else: # delete
-                  if current_keys_b: key = random.choice(list(current_keys_b)); ops.append(('delete', key))
-                  else: key = random.randint(1, max_key_val); ops.append(('insert', key, f"value_{key}")) # Fallback insert
-
-        # Time B+ Tree Mix
-        t_start = time.perf_counter()
-        temp_keys_b = set(current_keys_b) # Track changes during timed run
-        for op in ops:
-            op_type, key = op[0], op[1]
-            if op_type == 'insert': btree.insert(key, op[2]); temp_keys_b.add(key)
-            elif op_type == 'search': btree.search(key)
-            elif op_type == 'delete': deleted = btree.delete(key); temp_keys_b.discard(key) if deleted else None # Remove if actually deleted
-        results['bplus_mix_time'] = time.perf_counter() - t_start
-
-        # Time Brute Force Mix (Needs its own key tracking)
-        temp_keys_f = set(keys_initial)
+                  if op_keys_basis: key = random.choice(list(op_keys_basis)); ops.append(('delete', key)); op_keys_basis.discard(key)
+                  else: key = random.randint(1, max_key_val); ops.append(('insert', key, f"v_{key}"))
+        # Time B+ Unsorted Mix
         t_start = time.perf_counter()
         for op in ops:
-             op_type, key = op[0], op[1]
-             if op_type == 'insert': bf_db.insert(key, op[2]); temp_keys_f.add(key)
+            op_type, key = op[0], op[1]; val = op[2] if len(op)>2 else None
+            if op_type == 'insert': bplus_uns.insert(key, val)
+            elif op_type == 'search': bplus_uns.search(key)
+            elif op_type == 'update': bplus_uns.update(key, val)
+            elif op_type == 'delete': bplus_uns.delete(key)
+        results['bplus_mix_time_unsorted'] = time.perf_counter() - t_start
+        # Time B+ Sorted Mix
+        t_start = time.perf_counter()
+        for op in ops:
+            op_type, key = op[0], op[1]; val = op[2] if len(op)>2 else None
+            if op_type == 'insert': bplus_sort.insert(key, val)
+            elif op_type == 'search': bplus_sort.search(key)
+            elif op_type == 'update': bplus_sort.update(key, val)
+            elif op_type == 'delete': bplus_sort.delete(key)
+        results['bplus_mix_time_sorted'] = time.perf_counter() - t_start
+        # Time Brute Force Mix
+        t_start = time.perf_counter()
+        for op in ops:
+             op_type, key = op[0], op[1]; val = op[2] if len(op)>2 else None
+             if op_type == 'insert': bf_db.insert(key, val)
              elif op_type == 'search': bf_db.search(key)
-             elif op_type == 'delete': deleted = bf_db.delete(key); temp_keys_f.discard(key) if deleted else None
+             elif op_type == 'update': bf_db.update(key, val)
+             elif op_type == 'delete': bf_db.delete(key)
         results['bf_mix_time'] = time.perf_counter() - t_start
-
-        print(f"      Mix (B+/BF): {results['bplus_mix_time']:.4f}s / {results['bf_mix_time']:.4f}s")
-        return results
+        print(f"      Mix (B+U/B+S/BF): {results['bplus_mix_time_unsorted']:.4f}s / {results['bplus_mix_time_sorted']:.4f}s / {results['bf_mix_time']:.4f}s")
+        del bplus_uns, bplus_sort, bf_db; return results
